@@ -1,10 +1,10 @@
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # 1. 설정 및 즐겨찾기 초기화
-ST_VERSION = "V3.1 (체감온도 탑재)"
+ST_VERSION = "V3.2 (Bugfix & Logic Overhaul)"
 DEFAULT_PLACES = {
     "⛳ 군산 컨트리클럽": (35.895, 126.655),
     "🏠 우리집 (전주 기준)": (35.824, 127.148)
@@ -22,7 +22,7 @@ def get_current_location_by_ip():
 def get_coords_by_name(name):
     url = f"https://nominatim.openstreetmap.org/search?q={name}&format=json&limit=1"
     try:
-        res = requests.get(url, headers={'User-Agent': 'WeatherApp/3.1'}, timeout=3).json()
+        res = requests.get(url, headers={'User-Agent': 'WeatherApp/3.2'}, timeout=3).json()
         if res: return float(res[0]['lat']), float(res[0]['lon']), res[0]['display_name']
     except: return None, None, None
 
@@ -31,17 +31,14 @@ def fetch_weather(lat, lon):
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat, "longitude": lon,
-        "current": "temperature_2m,relative_humidity_2m,precipitation,cloud_cover,wind_speed_10m,wind_gusts_10m,weather_code",
-        # [변경점 1] hourly 파라미터에 'apparent_temperature' 추가
         "hourly": "temperature_2m,apparent_temperature,relative_humidity_2m,precipitation_probability,precipitation,cloud_cover,wind_speed_10m,wind_gusts_10m,uv_index",
-        "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max,sunshine_duration",
+        "daily": "temperature_2m_max,temperature_2m_min,precipitation_probability_max,uv_index_max",
         "timezone": "auto", "forecast_days": 10
     }
     return requests.get(url, params=params).json()
 
 # --- UI 구성 ---
-st.set_page_config(page_title="Gunsan CC Weather V3.1", layout="centered")
-# [수정] 오타 수정: unsafe_allow_stdio -> unsafe_allow_html
+st.set_page_config(page_title="Gunsan CC Weather V3.2", layout="centered")
 st.markdown(f"<p style='text-align:right; color:gray; font-size:10px;'>{ST_VERSION}</p>", unsafe_allow_html=True)
 st.title("🎯 필드 그늘 정밀 분석기")
 
@@ -76,9 +73,13 @@ if data:
     selected_date_str = st.select_slider("예보 날짜를 선택하세요 (향후 10일)", options=daily_dates)
     selected_date = datetime.strptime(selected_date_str, "%Y-%m-%d").date()
 
-    # [변경점 2] 데이터프레임에 "체감온도" 열 추가
+    # [수정 1] 타임존 에러 방지: UTC 등 꼬리표를 강제로 떼어내고 순수 시간만 남김
+    raw_times = pd.to_datetime(data["hourly"]["time"])
+    if raw_times.tz is not None:
+        raw_times = raw_times.dt.tz_localize(None)
+
     df_hourly = pd.DataFrame({
-        "시간_원본": pd.to_datetime(data["hourly"]["time"]),
+        "시간_원본": raw_times,
         "기온": data["hourly"]["temperature_2m"],
         "체감온도": data["hourly"]["apparent_temperature"],
         "습도": data["hourly"]["relative_humidity_2m"],
@@ -90,20 +91,23 @@ if data:
         "돌풍": data["hourly"]["wind_gusts_10m"]
     })
 
+    # 선택한 날짜 필터링
     df_day = df_hourly[df_hourly["시간_원본"].dt.date == selected_date].copy()
     
-    df_day["그늘상태"] = (df_day["구름량"] >= 60) & (df_day["강수량"] == 0) & (df_day["자외선"] <= 3)
+    # [수정 2] 야간 골프 추천 방지: 오전 6시 ~ 오후 7시 사이만 추천 가능 대상
+    is_daytime = (df_day["시간_원본"].dt.hour >= 6) & (df_day["시간_원본"].dt.hour <= 19)
+    df_day["그늘상태"] = (df_day["구름량"] >= 60) & (df_day["강수량"] == 0) & (df_day["자외선"] <= 3) & is_daytime
+    
     df_day["표시시간"] = df_day["시간_원본"].dt.strftime("%H:00")
     df_day.set_index("표시시간", inplace=True)
 
     st.divider()
     best_shade = df_day[df_day["그늘상태"] == True].index.tolist()
     if best_shade:
-        st.success(f"🌟 **{selected_date_str} 최적 그늘 시간대:** {', '.join(best_shade)}")
+        st.success(f"🌟 **{selected_date_str} 주간 최적 그늘 시간대:** {', '.join(best_shade)}")
     else:
-        st.warning(f"⚠️ {selected_date_str}에는 완벽한 그늘 조건이 없습니다. 아래 차트로 구름이 가장 많은 시간을 확인하세요.")
+        st.warning(f"⚠️ {selected_date_str}에는 주간 중 완벽한 그늘 조건이 없습니다. 아래 차트로 구름량을 확인하세요.")
 
-    # [변경점 3] 시각화 탭에 "온도(기온/체감)" 탭 추가
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["☁️ 그늘/자외선", "🌡️ 온도(기온/체감)", "🌧️ 비(확률/양)", "🌬️ 바람/돌풍", "📊 상세표"])
 
     with tab1:
@@ -112,20 +116,17 @@ if data:
         st.line_chart(df_day["자외선"], color="#FF7043")
 
     with tab2:
-        st.markdown("**실제 기온과, 습도/바람이 반영된 체감온도 비교**")
-        st.line_chart(df_day[["기온", "체감온도"]])
+        st.bar_chart(df_day[["기온", "체감온도"]])
 
     with tab3:
-        st.markdown("**시간별 강수 확률과 예상 강수량(mm)**")
         st.bar_chart(df_day[["강수확률", "강수량"]])
 
     with tab4:
-        st.markdown("**평균 풍속과 순간 최대 돌풍(km/h) 비교**")
         st.line_chart(df_day[["풍속", "돌풍"]])
 
     with tab5:
-        st.markdown(f"**{selected_date_str} 전체 데이터 명세**")
-        st.dataframe(df_day.drop(columns=["시간_원본", "그늘상태"]), use_container_width=True)
+        # [수정 3] 상세표의 소수점 1자리 정리
+        st.dataframe(df_day.drop(columns=["시간_원본", "그늘상태"]).round(1), use_container_width=True)
 
     st.divider()
     st.subheader("🗓️ 10일간의 전체 흐름")
@@ -136,4 +137,6 @@ if data:
         "최대강수확률": data["daily"]["precipitation_probability_max"],
         "최대자외선": data["daily"]["uv_index_max"]
     }).set_index("날짜")
-    st.table(df_10d)
+    
+    # [수정 3] 전체 흐름 표의 소수점 1자리 정리
+    st.dataframe(df_10d.round(1), use_container_width=True)
