@@ -44,7 +44,7 @@ def fetch_weather(lat, lon):
 
 # --- UI 구성 ---
 st.set_page_config(page_title="Gunsan CC Weather V3", layout="centered")
-st.markdown(f"<p style='text-align:right; color:gray; font-size:10px;'>{ST_VERSION}</p>", unsafe_allow_stdio=True)
+st.markdown(f"<p style='text-align:right; color:gray; font-size:10px;'>{ST_VERSION}</p>", unsafe_allow_html=True)
 st.title("🎯 필드 그늘 정밀 분석기")
 
 # [기능 1] 위치 및 즐겨찾기 관리
