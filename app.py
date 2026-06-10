@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime
 
 # 1. 설정 및 즐겨찾기 초기화
-ST_VERSION = "V5.1 (Perfect Mobile Edition)"
+ST_VERSION = "V5.1 (Pro Mode & Fixed Mobile Table)"
 DEFAULT_PLACES = {
     "⛳ 군산 컨트리클럽": (35.895, 126.655),
     "🏠 우리집 (전주 기준)": (35.824, 127.148)
@@ -27,21 +27,28 @@ def get_coords_by_name(name):
     except: return None, None, None
 
 @st.cache_data(ttl=600)
-def fetch_weather(lat, lon):
-    url = "https://api.open-meteo.com/v1/forecast"
+def fetch_weather(lat, lon, api_key):
+    # 🚨 [프로모드 반영] 오픈메테오 유료 상업용 전용 전용 엔드포인트 고정
+    url = "https://customer-api.open-meteo.com/v1/forecast"
     params = {
-        "latitude": lat, "longitude": lon,
+        "latitude": lat, 
+        "longitude": lon,
         "hourly": "temperature_2m,apparent_temperature,precipitation,cloud_cover,cloud_cover_low,cloud_cover_mid,wind_speed_10m,wind_speed_850hpa,uv_index",
         "daily": "temperature_2m_max,temperature_2m_min",
-        "timezone": "auto", "forecast_days": 10
+        "timezone": "auto", 
+        "forecast_days": 10,
+        "apikey": api_key  # 프로모드 인증 라이선스 키
     }
     return requests.get(url, params=params).json()
 
 # --- UI 구성 ---
 st.set_page_config(page_title="Gunsan CC Weather V5.1", layout="centered")
-# [수정 완료] 오타 원천 차단
+# 오타 원천 전면 수정 완료 (unsafe_allow_html=True)
 st.markdown(f"<p style='text-align:right; color:gray; font-size:10px;'>{ST_VERSION}</p>", unsafe_allow_html=True)
 st.title("🎯 필드 그늘 & 위험지역 분석기")
+
+# 사이드바에 프로모드 전용 API 키 입력창 배치 (보안 마스킹 처리)
+api_key = st.sidebar.text_input("🔑 Open-Meteo Pro API Key", value="YOUR_API_KEY", type="password")
 
 with st.expander("📍 위치 설정 및 즐겨찾기 관리", expanded=False):
     mode = st.radio("위치 설정", ["자동 위치", "즐겨찾기", "장소 검색"], horizontal=True)
@@ -66,9 +73,9 @@ with st.expander("📍 위치 설정 및 즐겨찾기 관리", expanded=False):
 
 st.info(f"🌐 기준: **{d_name}**")
 
-data = fetch_weather(lat, lon)
+data = fetch_weather(lat, lon, api_key)
 
-if data:
+if data and "hourly" in data:
     st.subheader("📅 분석 날짜 선택")
     daily_dates = data["daily"]["time"]
     selected_date_str = st.select_slider("예보 날짜를 선택하세요 (향후 10일)", options=daily_dates)
@@ -93,72 +100,67 @@ if data:
 
     df_day = df_hourly[df_hourly["시간_원본"].dt.date == selected_date].copy()
     
-    # 지표 엔진 계산
+    # 데이터 수치 연산
     df_day["구름두께"] = ((df_day["하층구름"] + df_day["중층구름"]) / 2).round(1)
     df_day["그늘지속성"] = df_day["상층풍속"].apply(lambda x: max(0, min(100, int((1 - (x / 50)) * 100))))
 
-    # 조건 매칭 (06:00 ~ 19:00 주간 기준)
+    # 주간 노출 필터링 연산
     is_daytime = (df_day["시간_원본"].dt.hour >= 6) & (df_day["시간_원본"].dt.hour <= 19)
     df_day["정밀그늘확정"] = (df_day["구름두께"] >= 60) & (df_day["강수량"] == 0) & (df_day["자외선"] <= 3) & (df_day["그늘지속성"] >= 50) & is_daytime
     df_day["라운딩금지"] = is_daytime & ((df_day["체감온도"] >= 33.0) | ((df_day["구름두께"] <= 20) & (df_day["자외선"] >= 7)))
 
-    def assign_status_text(row):
-        if row["라운딩금지"]: return "🚨 위험"
-        elif row["정밀그늘확정"]: return "🟢 추천"
-        else: return "보통"
-
-    df_day["상태"] = df_day.apply(assign_status_text, axis=1)
-
-    # [수정] 모바일용 데이터프레임 분할 및 시간 포맷팅 안정화
-    df_mobile = df_day[is_daytime].copy()
-    
     df_day["표시시간"] = df_day["시간_원본"].dt.strftime("%H:00")
     df_day.set_index("표시시간", inplace=True)
 
-    df_mobile["표시시간"] = df_mobile["시간_원본"].dt.strftime("%H:00")
-    df_mobile.set_index("표시시간", inplace=True)
-
-    # 상단 카드 요약 브리핑
+    st.divider()
+    
+    # 최상단 긴급 타임라인 요약 브리핑
     danger_hours = df_day[df_day["라운딩금지"] == True].index.tolist()
     best_shade = df_day[df_day["정밀그늘확정"] == True].index.tolist()
 
-    st.divider()
     if danger_hours:
         st.error(f"🛑 **열사병 위험 (라운딩 금지 권장):** {', '.join(danger_hours)}")
     if best_shade:
         st.success(f"🌟 **안전 보장 (명품 그늘 시간대):** {', '.join(best_shade)}")
     if not danger_hours and not best_shade:
-        st.info("✅ 극단적인 폭염 위험이나 완벽한 그늘이 없는 무난한 보통 날씨입니다.")
+        st.info("✅ 극단적인 위험 구역이나 완벽한 그늘이 없는 무난한 보통 날씨입니다.")
 
-    # 📊 시간대별 컬러 코딩 요약 표
-    st.subheader("📱 한눈에 보는 시간대별 컨디션 (06시~19시)")
-    st.markdown("<p style='font-size:12px; color:gray; margin-top:-10px;'>※ 초록: 그늘추천 / 빨강: 열사병위험 / 검은색: 보통</p>", unsafe_allow_html=True)
+    # 📱 [모바일 뷰어 대혁신] 1시간 단위 컬러 그리딩 요약 명세표
+    st.subheader("📱 한눈에 보는 시간대별 컨디션 표")
+    st.markdown("<p style='font-size:12px; color:gray; margin-top:-10px;'>※ 초록색=그늘 추천 / 빨간색=열사병 위험 / 검은색=보통</p>", unsafe_allow_html=True)
 
-    # 화면 공간 확보를 위해 불필요한 단위 생략 및 컬럼 최소화
-    df_mobile_display = pd.DataFrame({
-        "체감": df_mobile["체감온도"].round(1),
-        "구름두께": df_mobile["구름두께"].astype(int).astype(str) + "%",
-        "지속성": df_mobile["그늘지속성"].astype(str) + "점",
-        "자외선": df_mobile["자외선"].round(1),
-        "현황": df_mobile["상태"]
+    def assign_status_text(row):
+        if row["라운딩금지"]: return "🚨 위험(금지)"
+        elif row["정밀그늘확정"]: return "🟢 그늘추천"
+        else: return "보통"
+
+    df_day["상태"] = df_day.apply(assign_status_text, axis=1)
+
+    # 모바일 가로 해상도 한계 극복을 위한 고밀도 5열 압축
+    df_mobile = pd.DataFrame({
+        "체감": df_day["체감온도"].round(1),
+        "두께(%)": df_day["구름두께"].astype(int),
+        "지속(점)": df_day["그늘지속성"],
+        "UV": df_day["자외선"].round(1),
+        "현황": df_day["상태"]
     })
 
-    # 로우(Row) 색상 정의 함수
+    # 로우 단위 다이내믹 컬러링 맵 매칭 함수
     def style_rows_by_condition(row):
         if "위험" in str(row["현황"]):
-            return ['color: #D32F2F; font-weight: bold;'] * len(row)
-        elif "추천" in str(row["현황"]):
-            return ['color: #2E7D32; font-weight: bold;'] * len(row)
+            return ['color: #D32F2F; font-weight: bold; background-color: #FFEBEE;'] * len(row)  # 위험 = 연빨강 배경 + 빨간 글씨
+        elif "그늘" in str(row["현황"]):
+            return ['color: #2E7D32; font-weight: bold; background-color: #E8F5E9;'] * len(row)  # 추천 = 연초록 배경 + 초록 글씨
         else:
-            return ['color: #212121; font-weight: normal;'] * len(row)
+            return ['color: #212121; font-weight: normal; background-color: #FFFFFF;'] * len(row)  # 보통 = 기본 검은 글씨
 
-    styled_mobile_df = df_mobile_display.style.apply(style_rows_by_condition, axis=1)
-    st.dataframe(styled_mobile_df, use_container_width=True, height=490)
+    styled_mobile_df = df_mobile.style.apply(style_rows_by_condition, axis=1)
+    st.dataframe(styled_mobile_df, use_container_width=True, height=520)
 
-    # 📉 차트 분석 섹션 (하단 이동)
+    # 하단 분석 보조용 차트
     st.divider()
     st.subheader("📉 정밀 예측 트렌드 그래프")
-    tab1, tab2 = st.tabs(["☁️ 구름 밀도 및 지속성", "🌡️ 기온 변화 추이"])
+    tab1, tab2 = st.tabs(["☁️ 구름 밀도 및 상층풍 바람", "🌡️ 기온 변화 추이"])
     
     with tab1:
         st.bar_chart(df_day["구름두께"], color="#90A4AE")
@@ -166,3 +168,7 @@ if data:
 
     with tab2:
         st.line_chart(df_day[["기온", "체감온도"]])
+else:
+    st.error("❌ 기상 데이터를 원활하게 호출하지 못했습니다. 프로모드 API 인증키 불일치 혹은 엔드포인트 상태를 점검해 주세요.")
+    if data and "error" in data:
+        st.caption(f"인증 거부 사유: {data.get('reason', data)}")
