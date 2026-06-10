@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import datetime
 
 # 1. 설정 및 즐겨찾기 초기화
-ST_VERSION = "V5.2 (Pro/Free Auto-Switch & Color Grid)"
+ST_VERSION = "V6.0 (Free API Only & Mobile Stable)"
 DEFAULT_PLACES = {
     "⛳ 군산 컨트리클럽": (35.895, 126.655),
     "🏠 우리집 (전주 기준)": (35.824, 127.148)
@@ -22,28 +22,22 @@ def get_current_location_by_ip():
 def get_coords_by_name(name):
     url = f"https://nominatim.openstreetmap.org/search?q={name}&format=json&limit=1"
     try:
-        res = requests.get(url, headers={'User-Agent': 'WeatherApp/5.2'}, timeout=3).json()
+        res = requests.get(url, headers={'User-Agent': 'WeatherApp/6.0'}, timeout=3).json()
         if res: return float(res[0]['lat']), float(res[0]['lon']), res[0]['display_name']
     except: return None, None, None
 
 @st.cache_data(ttl=600)
-def fetch_weather(lat, lon, api_key):
-    # 🚨 API 키 입력 여부에 따라 무료/유료 주소를 안전하게 스위칭하여 에러를 방지합니다.
-    if api_key and api_key != "YOUR_API_KEY":
-        url = "https://customer-api.open-meteo.com/v1/forecast"
-        params = {"latitude": lat, "longitude": lon, "apikey": api_key}
-    else:
-        url = "https://api.open-meteo.com/v1/forecast"
-        params = {"latitude": lat, "longitude": lon}
-        
-    common_params = {
-        "hourly": "temperature_2m,apparent_temperature,precipitation,cloud_cover,cloud_cover_low,cloud_cover_mid,wind_speed_10m,wind_speed_850hpa,uv_index",
-        "daily": "temperature_2m_max,temperature_2m_min",
+def fetch_weather(lat, lon):
+    # 🚨 유료/무료 스위칭 삭제. 완전 무료 API로 고정. 
+    # 에러 주범이었던 wind_speed_850hpa 삭제, wind_speed_10m만 사용.
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat, 
+        "longitude": lon,
+        "hourly": "temperature_2m,apparent_temperature,precipitation,cloud_cover,cloud_cover_low,cloud_cover_mid,wind_speed_10m,uv_index",
         "timezone": "auto", 
         "forecast_days": 10
     }
-    params.update(common_params)
-    
     try:
         response = requests.get(url, params=params, timeout=5)
         return response.json()
@@ -51,12 +45,9 @@ def fetch_weather(lat, lon, api_key):
         return {"error": str(e)}
 
 # --- UI 구성 ---
-st.set_page_config(page_title="Gunsan CC Weather V5.2", layout="centered")
+st.set_page_config(page_title="Gunsan CC Weather V6.0", layout="centered")
 st.markdown(f"<p style='text-align:right; color:gray; font-size:10px;'>{ST_VERSION}</p>", unsafe_allow_html=True)
 st.title("🎯 필드 그늘 & 위험지역 분석기")
-
-# 사이드바 API 키 가이드
-api_key = st.sidebar.text_input("🔑 Open-Meteo Pro API Key (선택)", value="YOUR_API_KEY", type="password")
 
 with st.expander("📍 위치 설정 및 즐겨찾기 관리", expanded=False):
     mode = st.radio("위치 설정", ["자동 위치", "즐겨찾기", "장소 검색"], horizontal=True)
@@ -81,18 +72,18 @@ with st.expander("📍 위치 설정 및 즐겨찾기 관리", expanded=False):
 
 st.info(f"🌐 기준: **{d_name}**")
 
-data = fetch_weather(lat, lon, api_key)
+data = fetch_weather(lat, lon)
 
-# API 인증 실패 및 데이터 누락 방어 로직 고도화
 if data and "hourly" in data:
     st.subheader("📅 분석 날짜 선택")
-    daily_dates = data["daily"]["time"]
-    selected_date_str = st.select_slider("예보 날짜를 선택하세요 (향후 10일)", options=daily_dates)
-    selected_date = datetime.strptime(selected_date_str, "%Y-%m-%d").date()
-
+    # 무료 API의 경우 daily가 없을 수 있으므로 hourly 데이터를 기준으로 날짜 추출
     raw_times = pd.to_datetime(data["hourly"]["time"])
     if raw_times.tz is not None:
         raw_times = raw_times.dt.tz_localize(None)
+        
+    unique_dates = raw_times.dt.date.unique().tolist()
+    # select_slider 대신 selectbox 사용 (안정성 강화)
+    selected_date = st.selectbox("예보 날짜를 선택하세요 (향후 10일)", options=unique_dates)
 
     df_hourly = pd.DataFrame({
         "시간_원본": raw_times,
@@ -102,16 +93,15 @@ if data and "hourly" in data:
         "전체구름량": data["hourly"]["cloud_cover"],
         "하층구름": data["hourly"]["cloud_cover_low"],
         "중층구름": data["hourly"]["cloud_cover_mid"],
-        "상층풍속": data["hourly"]["wind_speed_850hpa"],
         "지상풍속": data["hourly"]["wind_speed_10m"],
         "자외선": data["hourly"]["uv_index"]
     })
 
     df_day = df_hourly[df_hourly["시간_원본"].dt.date == selected_date].copy()
     
-    # 핵심 기상 지표 계산
+    # 핵심 기상 지표 계산 (지상풍속 기준 그늘지속성 재조정)
     df_day["구름두께"] = ((df_day["하층구름"] + df_day["중층구름"]) / 2).round(1)
-    df_day["그늘지속성"] = df_day["상층풍속"].apply(lambda x: max(0, min(100, int((1 - (x / 50)) * 100))))
+    df_day["그늘지속성"] = df_day["지상풍속"].apply(lambda x: max(0, min(100, int((1 - (x / 30)) * 100))))
 
     # 필드 주간 가동 시간 고정 (오전 6시 ~ 오후 7시)
     is_daytime = (df_day["시간_원본"].dt.hour >= 6) & (df_day["시간_원본"].dt.hour <= 19)
@@ -134,7 +124,7 @@ if data and "hourly" in data:
     if not danger_hours and not best_shade:
         st.info("✅ 야외 활동에 극단적인 위험이나 특별한 그늘 호재가 없는 무난한 날씨입니다.")
 
-    # 📱 [요청 반영] 모바일 전용 1시간 단위 컬러 컨디션 명세표
+    # 📱 모바일 전용 1시간 단위 컬러 컨디션 명세표
     st.subheader("📱 한눈에 보는 시간대별 컨디션 표")
     st.markdown("<p style='font-size:12px; color:gray; margin-top:-10px;'>※ 초록색 줄=그늘 찬스 / 빨간색 줄=열사병 위험 / 검은색 줄=보통</p>", unsafe_allow_html=True)
 
@@ -145,7 +135,6 @@ if data and "hourly" in data:
 
     df_day["상태"] = df_day.apply(assign_status_text, axis=1)
 
-    # 모바일 가로 해상도 깨짐 방지용 5열 다이어트 레이아웃
     df_mobile = pd.DataFrame({
         "체감(℃)": df_day["체감온도"].round(1),
         "구름(%)": df_day["구름두께"].astype(int),
@@ -154,7 +143,6 @@ if data and "hourly" in data:
         "현황": df_day["상태"]
     })
 
-    # 모바일 야외 가독성 극대화를 위한 다이내믹 로우 인젝션 스타일링
     def style_rows_by_condition(row):
         if "위험" in str(row["현황"]):
             return ['color: #D32F2F; font-weight: bold; background-color: #FFEBEE;'] * len(row)
@@ -164,7 +152,6 @@ if data and "hourly" in data:
             return ['color: #212121; font-weight: normal; background-color: #FFFFFF;'] * len(row)
 
     styled_mobile_df = df_mobile.style.apply(style_rows_by_condition, axis=1)
-    # 모바일에서 스크롤 압박 없이 쾌적하게 보도록 테이블 출력
     st.dataframe(styled_mobile_df, use_container_width=True, height=520)
 
     # 하단 시각화 탭
@@ -180,7 +167,5 @@ if data and "hourly" in data:
         st.line_chart(df_day[["기온", "체감온도"]])
 else:
     st.error("⚠️ 데이터 로드에 실패했습니다.")
-    if data and "reason" in data:
-        st.caption(f"상세 사유: {data['reason']}")
-    else:
-        st.caption("사유: 올바른 Open-Meteo API 라이선스 키를 입력하시거나, 키 입력란을 완전히 비워 무료 공용망 모드로 구동해 주세요.")
+    if data and "error" in data:
+        st.caption(f"상세 사유: {data['error']}")
